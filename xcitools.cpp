@@ -92,8 +92,8 @@ static inline void openssl_hash(const char *digestname, uint8_t *addr,
 				off_t TRIM_size, off_t ROM_size,
 				uint8_t *TRIM_hash, uint8_t *ROM_hash)
 {
-	EVP_MD_CTX *m_context_trim = EVP_MD_CTX_new();
-	EVP_MD_CTX *m_context_rom = EVP_MD_CTX_new();
+	EVP_MD_CTX *m_context_trim = EVP_MD_CTX_create();
+	EVP_MD_CTX *m_context_rom = EVP_MD_CTX_create();
 	EVP_DigestInit_ex(m_context_trim, EVP_get_digestbyname(digestname), NULL);
 	EVP_DigestUpdate(m_context_trim, addr, TRIM_size);
 	EVP_MD_CTX_copy_ex(m_context_rom, m_context_trim);
@@ -105,8 +105,8 @@ static inline void openssl_hash(const char *digestname, uint8_t *addr,
 	}
 	EVP_DigestFinal_ex(m_context_trim, TRIM_hash, NULL);
 	EVP_DigestFinal_ex(m_context_rom, ROM_hash, NULL);
-	EVP_MD_CTX_free(m_context_trim);
-	EVP_MD_CTX_free(m_context_rom);
+	EVP_MD_CTX_destroy(m_context_trim);
+	EVP_MD_CTX_destroy(m_context_rom);
 }
 
 static void manage_xci(const enum modes mode, const char *path)
@@ -224,8 +224,8 @@ static inline void openssl_hash(const char *digestname, FILE *fd,
 				off_t TRIM_size, off_t ROM_size,
 				uint8_t *TRIM_hash, uint8_t *ROM_hash)
 {
-	EVP_MD_CTX *m_context_trim = EVP_MD_CTX_new();
-	EVP_MD_CTX *m_context_rom = EVP_MD_CTX_new();
+	EVP_MD_CTX *m_context_trim = EVP_MD_CTX_create();
+	EVP_MD_CTX *m_context_rom = EVP_MD_CTX_create();
 	EVP_DigestInit_ex(m_context_trim, EVP_get_digestbyname(digestname), NULL);
 	for (off_t i = 0; i < TRIM_size; i += BUFFER_SIZE) {
 		off_t bytesLeft = TRIM_size - i;
@@ -243,8 +243,8 @@ static inline void openssl_hash(const char *digestname, FILE *fd,
 	}
 	EVP_DigestFinal_ex(m_context_trim, TRIM_hash, NULL);
 	EVP_DigestFinal_ex(m_context_rom, ROM_hash, NULL);
-	EVP_MD_CTX_free(m_context_trim);
-	EVP_MD_CTX_free(m_context_rom);
+	EVP_MD_CTX_destroy(m_context_trim);
+	EVP_MD_CTX_destroy(m_context_rom);
 }
 
 static void manage_xci(const enum modes mode, const char *path)
