@@ -25,6 +25,9 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <openssl/md5.h>
+#include <openssl/sha.h>
+#include <openssl/evp.h>
 #include "crc32/Crc32.h"
 
 #if SIZE_MAX > UINT32_MAX
@@ -57,7 +60,7 @@
 #define BUFFER_SIZE	(4 * 1024)
 static uint8_t buffer[BUFFER_SIZE];
 
-enum modes { trim, pad, crc32 };
+enum modes { trim, pad, crc32, md5, sha1 };
 
 static off_t get_ROMsize(uint32_t cart_type)
 {
@@ -85,11 +88,34 @@ static off_t get_ROMsize(uint32_t cart_type)
 }
 
 #ifdef WANTS_MMAP
+static inline void openssl_hash(const char *digestname, uint8_t *addr,
+				off_t TRIM_size, off_t ROM_size,
+				uint8_t *TRIM_hash, uint8_t *ROM_hash)
+{
+	EVP_MD_CTX *m_context_trim = EVP_MD_CTX_new();
+	EVP_MD_CTX *m_context_rom = EVP_MD_CTX_new();
+	EVP_DigestInit_ex(m_context_trim, EVP_get_digestbyname(digestname), NULL);
+	EVP_DigestUpdate(m_context_trim, addr, TRIM_size);
+	EVP_MD_CTX_copy_ex(m_context_rom, m_context_trim);
+	for (off_t i = TRIM_size; i < ROM_size; i += BUFFER_SIZE) {
+		off_t bytesLeft = ROM_size - i;
+		size_t chunk = (BUFFER_SIZE < bytesLeft) ? BUFFER_SIZE : bytesLeft;
+
+		EVP_DigestUpdate(m_context_rom, buffer, chunk);
+	}
+	EVP_DigestFinal_ex(m_context_trim, TRIM_hash, NULL);
+	EVP_DigestFinal_ex(m_context_rom, ROM_hash, NULL);
+	EVP_MD_CTX_free(m_context_trim);
+	EVP_MD_CTX_free(m_context_rom);
+}
+
 static void manage_xci(const enum modes mode, const char *path)
 {
 	uint8_t cart_size;
 	off_t ROM_size, TRIM_size;
 	uint32_t TMP_size, ROM_crc32 = 0, TRIM_crc32 = 0;
+	uint8_t ROM_md5[MD5_DIGEST_LENGTH], TRIM_md5[MD5_DIGEST_LENGTH];
+	uint8_t ROM_sha1[SHA_DIGEST_LENGTH], TRIM_sha1[SHA_DIGEST_LENGTH];
 	off_t FILE_size, i;
 	uint8_t *addr;
 	int fd = open(path, O_RDONLY, 0);
@@ -154,7 +180,6 @@ static void manage_xci(const enum modes mode, const char *path)
 		}
 		munmap(addr, FILE_size);
 		close(fd);
-		memset(buffer, 0xFF, BUFFER_SIZE);
 		ROM_crc32 = TRIM_crc32;
 		for (i = TRIM_size; i < ROM_size; i += BUFFER_SIZE) {
 			off_t bytesLeft = ROM_size - i;
@@ -162,17 +187,73 @@ static void manage_xci(const enum modes mode, const char *path)
 
 			ROM_crc32 = crc32_fast(buffer, chunk, ROM_crc32);
 		}
+		printf("File %strimmed\n", FILE_size == TRIM_size ? "" : "not ");
 		printf("%08X  %s // trim size: %jd\n", TRIM_crc32, path, (intmax_t)TRIM_size);
 		printf("%08X  %s // cart size: %jd\n", ROM_crc32, path, (intmax_t)ROM_size);
+		break;
+
+	case md5:
+		openssl_hash("md5", addr, TRIM_size, ROM_size, TRIM_md5, ROM_md5);
+		munmap(addr, FILE_size);
+		close(fd);
+		printf("File %strimmed\n", FILE_size == TRIM_size ? "" : "not ");
+		for (off_t i = 0; i < MD5_DIGEST_LENGTH; i++)
+			printf("%.2X", TRIM_md5[i]);
+		printf("  %s // trim size: %jd\n", path, (intmax_t)TRIM_size);
+		for (off_t i = 0; i < MD5_DIGEST_LENGTH; i++)
+			printf("%.2X", ROM_md5[i]);
+		printf("  %s // cart size: %jd\n", path, (intmax_t)ROM_size);
+		break;
+
+	case sha1:
+		openssl_hash("sha1", addr, TRIM_size, ROM_size, TRIM_sha1, ROM_sha1);
+		munmap(addr, FILE_size);
+		close(fd);
+		printf("File %strimmed\n", FILE_size == TRIM_size ? "" : "not ");
+		for (off_t i = 0; i < SHA_DIGEST_LENGTH; i++)
+			printf("%.2X", TRIM_sha1[i]);
+		printf("  %s // trim size: %jd\n", path, (intmax_t)TRIM_size);
+		for (off_t i = 0; i < SHA_DIGEST_LENGTH; i++)
+			printf("%.2X", ROM_sha1[i]);
+		printf("  %s // cart size: %jd\n", path, (intmax_t)ROM_size);
 		break;
 	}
 }
 #else
+static inline void openssl_hash(const char *digestname, FILE *fd,
+				off_t TRIM_size, off_t ROM_size,
+				uint8_t *TRIM_hash, uint8_t *ROM_hash)
+{
+	EVP_MD_CTX *m_context_trim = EVP_MD_CTX_new();
+	EVP_MD_CTX *m_context_rom = EVP_MD_CTX_new();
+	EVP_DigestInit_ex(m_context_trim, EVP_get_digestbyname(digestname), NULL);
+	for (off_t i = 0; i < TRIM_size; i += BUFFER_SIZE) {
+		off_t bytesLeft = TRIM_size - i;
+		size_t chunk = (BUFFER_SIZE < bytesLeft) ? BUFFER_SIZE : bytesLeft;
+
+		fread(buffer, 1, BUFFER_SIZE, fd);
+		EVP_DigestUpdate(m_context_trim, buffer, chunk);
+	}
+	EVP_MD_CTX_copy_ex(m_context_rom, m_context_trim);
+	for (off_t i = TRIM_size; i < ROM_size; i += BUFFER_SIZE) {
+		off_t bytesLeft = ROM_size - i;
+		size_t chunk = (BUFFER_SIZE < bytesLeft) ? BUFFER_SIZE : bytesLeft;
+
+		EVP_DigestUpdate(m_context_rom, buffer, chunk);
+	}
+	EVP_DigestFinal_ex(m_context_trim, TRIM_hash, NULL);
+	EVP_DigestFinal_ex(m_context_rom, ROM_hash, NULL);
+	EVP_MD_CTX_free(m_context_trim);
+	EVP_MD_CTX_free(m_context_rom);
+}
+
 static void manage_xci(const enum modes mode, const char *path)
 {
 	uint8_t cart_size;
 	off_t ROM_size, TRIM_size;
 	uint32_t TMP_size, ROM_crc32 = 0, TRIM_crc32 = 0;
+	uint8_t ROM_md5[MD5_DIGEST_LENGTH], TRIM_md5[MD5_DIGEST_LENGTH];
+	uint8_t ROM_sha1[SHA_DIGEST_LENGTH], TRIM_sha1[SHA_DIGEST_LENGTH];
 	off_t FILE_size, i;
 	FILE *fd = fopen(path, "rb");
 
@@ -256,6 +337,30 @@ static void manage_xci(const enum modes mode, const char *path)
 		printf("%08X  %s // trim size: %jd\n", TRIM_crc32, path, (intmax_t)TRIM_size);
 		printf("%08X  %s // cart size: %jd\n", ROM_crc32, path, (intmax_t)ROM_size);
 		break;
+
+	case md5:
+		openssl_hash("md5", fd, TRIM_size, ROM_size, TRIM_md5, ROM_md5);
+		fclose(fd);
+		printf("File %strimmed\n", FILE_size == TRIM_size ? "" : "not ");
+		for (off_t i = 0; i < MD5_DIGEST_LENGTH; i++)
+			printf("%.2X", TRIM_md5[i]);
+		printf("  %s // trim size: %jd\n", path, (intmax_t)TRIM_size);
+		for (off_t i = 0; i < MD5_DIGEST_LENGTH; i++)
+			printf("%.2X", ROM_md5[i]);
+		printf("  %s // cart size: %jd\n", path, (intmax_t)ROM_size);
+		break;
+
+	case sha1:
+		openssl_hash("sha1", fd, TRIM_size, ROM_size, TRIM_sha1, ROM_sha1);
+		fclose(fd);
+		printf("File %strimmed\n", FILE_size == TRIM_size ? "" : "not ");
+		for (off_t i = 0; i < SHA_DIGEST_LENGTH; i++)
+			printf("%.2X", TRIM_sha1[i]);
+		printf("  %s // trim size: %jd\n", path, (intmax_t)TRIM_size);
+		for (off_t i = 0; i < SHA_DIGEST_LENGTH; i++)
+			printf("%.2X", ROM_sha1[i]);
+		printf("  %s // cart size: %jd\n", path, (intmax_t)ROM_size);
+		break;
 	}
 }
 #endif
@@ -265,6 +370,8 @@ static void usage(void) {
 		"Usage: xcitools <command> <files...>\n"
 		"Commands:\n"
 		"c		Calculate CRC32\n"
+		"m		Calculate MD5\n"
+		"s		Calculate SHA1\n"
 		"t		Trims\n"
 		"p		Padds\n"
 	);
@@ -285,6 +392,10 @@ int main(int argc, char *argv[])
 		mode = pad;
 	} else if (*argv[1] == 'c') {
 		mode = crc32;
+	} else if (*argv[1] == 'm') {
+		mode = md5;
+	} else if (*argv[1] == 's') {
+		mode = sha1;
 	} else {
 		usage();
 	}
